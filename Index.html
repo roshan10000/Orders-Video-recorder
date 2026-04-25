@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serverless Order Recorder</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://apis.google.com/js/api.js"></script>
+    <script src="https://accounts.google.com/gsi/client"></script>
+    <style>
+        #videoSource { display: none; }
+        canvas { width: 100%; border-radius: 12px; background: #000; box-shadow: 0 20px 50px rgba(0,0,0,0.3); }
+        .config-area { display: none; }
+    </style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+
+    <nav class="bg-white border-b p-4 flex justify-between items-center sticky top-0 z-50">
+        <h1 class="text-xl font-black text-blue-600">📦 DISPATCH<span class="text-slate-800">SYNC</span></h1>
+        <div class="flex gap-3">
+            <button id="authBtn" onclick="handleAuthClick()" class="bg-blue-600 text-white px-5 py-2 rounded-full text-sm font-bold shadow-lg shadow-blue-200">🔐 Authorize Google</button>
+            <button onclick="toggleAdmin()" class="bg-slate-200 p-2 rounded-full">⚙️</button>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
+        
+        <div class="lg:col-span-4 space-y-6">
+            
+            <div id="adminSettings" class="config-area bg-white p-6 rounded-2xl border-2 border-dashed border-blue-200 shadow-sm">
+                <h3 class="font-bold text-blue-800 mb-4 text-sm">System Keys (Required)</h3>
+                <div class="space-y-3">
+                    <input type="text" id="apiKey" class="w-full text-xs p-3 bg-slate-50 border rounded-lg" placeholder="Google API Key">
+                    <input type="text" id="clientId" class="w-full text-xs p-3 bg-slate-50 border rounded-lg" placeholder="Google Client ID">
+                    <input type="text" id="sheetId" class="w-full text-xs p-3 bg-slate-50 border rounded-lg" placeholder="Google Sheet ID">
+                    <button onclick="saveKeys()" class="w-full bg-blue-600 text-white text-xs py-3 rounded-lg font-bold">SAVE SETTINGS</button>
+                </div>
+            </div>
+
+            <div class="bg-white p-8 rounded-3xl shadow-xl shadow-slate-200/50 space-y-5">
+                <h2 class="text-xs font-bold text-slate-400 uppercase tracking-widest">Recording Session</h2>
+                <input type="text" id="orderId" placeholder="Order ID" class="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-4 focus:ring-blue-100 transition-all outline-none text-lg">
+                <input type="text" id="trackingId" placeholder="Tracking ID" class="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-4 focus:ring-blue-100 transition-all outline-none text-lg">
+                
+                <div class="grid grid-cols-2 gap-4">
+                    <select id="platform" class="p-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none">
+                        <option>Amazon</option><option>Flipkart</option><option>Shopify</option>
+                    </select>
+                    <select id="orderType" class="p-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none">
+                        <option value="F">Forward</option><option value="R">Return</option>
+                    </select>
+                </div>
+
+                <div class="pt-4">
+                    <button id="startBtn" onclick="startRecording()" class="w-full bg-rose-500 hover:bg-rose-600 text-white font-black py-5 rounded-2xl shadow-xl shadow-rose-200 transition-all active:scale-95">⏺ START RECORDING</button>
+                    <button id="stopBtn" onclick="stopRecording()" class="hidden w-full bg-slate-900 text-white font-black py-5 rounded-2xl active:scale-95">⏹ STOP & SAVE</button>
+                </div>
+            </div>
+
+            <div id="status" class="bg-white p-4 rounded-xl text-center text-xs font-mono text-slate-500 shadow-sm border border-slate-100">
+                STATUS: Ready to record
+            </div>
+        </div>
+
+        <div class="lg:col-span-8 space-y-6">
+            <div class="relative group">
+                <canvas id="recorderCanvas" width="1280" height="720"></canvas>
+                <video id="videoSource" autoplay muted playsinline></video>
+                <div class="absolute bottom-4 right-4 bg-black/60 text-white px-4 py-2 rounded-full text-xs font-mono backdrop-blur-md">
+                    LIVE: <span id="liveClock">--:--:--</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /* --- GLOBAL VARIABLES --- */
+        let mediaRecorder, recordedChunks = [], stream, animationId, tokenClient;
+        let accessToken = null;
+        const video = document.getElementById('videoSource'), canvas = document.getElementById('recorderCanvas'), ctx = canvas.getContext('2d');
+
+        /* --- GOOGLE API INITIALIZATION --- */
+        function gapiStart() {
+            gapi.load('client', async () => {
+                const API_KEY = localStorage.getItem('apiKey');
+                await gapi.client.init({ apiKey: API_KEY, discoveryDocs: [
+                    "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+                    "https://www.googleapis.com/discovery/v1/apis/sheets/v4/rest"
+                ]});
+            });
+            tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: localStorage.getItem('clientId'),
+                scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
+                callback: (res) => { accessToken = res.access_token; document.getElementById('authBtn').innerText = "✅ Authorized"; }
+            });
+        }
+        window.onload = gapiStart;
+
+        function handleAuthClick() { tokenClient.requestAccessToken(); }
+
+        /* --- ADMIN LOGIC --- */
+        function toggleAdmin() { if(prompt("Password:") === "admin123") document.getElementById('adminSettings').style.display = 'block'; }
+        function saveKeys() {
+            localStorage.setItem('apiKey', document.getElementById('apiKey').value);
+            localStorage.setItem('clientId', document.getElementById('clientId').value);
+            localStorage.setItem('sheetId', document.getElementById('sheetId').value);
+            location.reload();
+        }
+
+        /* --- RECORDING LOGIC --- */
+        function drawFrame() {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const ts = new Date().toLocaleString();
+            document.getElementById('liveClock').innerText = ts;
+            ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(30, 650, 450, 45);
+            ctx.font = "24px Courier New"; ctx.fillStyle = "#00FF00"; ctx.fillText(ts, 45, 680);
+            animationId = requestAnimationFrame(drawFrame);
+        }
+
+        async function startRecording() {
+            if(!accessToken) return alert("Please Authorize Google first!");
+            stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: true });
+            video.srcObject = stream; video.play(); drawFrame();
+            
+            const canvasStream = canvas.captureStream(30);
+            canvasStream.addTrack(stream.getAudioTracks()[0]);
+            
+            mediaRecorder = new MediaRecorder(canvasStream, { mimeType: 'video/webm' });
+            mediaRecorder.ondataavailable = (e) => recordedChunks.push(e.data);
+            mediaRecorder.onstop = finalizeAction;
+            
+            recordedChunks = []; mediaRecorder.start();
+            document.getElementById('startBtn').classList.add('hidden');
+            document.getElementById('stopBtn').classList.remove('hidden');
+            updateStatus("Recording...");
+        }
+
+        function stopRecording() {
+            mediaRecorder.stop(); 
+            cancelAnimationFrame(animationId);
+            stream.getTracks().forEach(t => t.stop());
+            document.getElementById('startBtn').classList.remove('hidden');
+            document.getElementById('stopBtn').classList.add('hidden');
+        }
+
+        /* --- AUTO DOWNLOAD & CLOUD UPLOAD --- */
+        async function finalizeAction() {
+            const oId = document.getElementById('orderId').value;
+            const tId = document.getElementById('trackingId').value;
+            const type = document.getElementById('orderType').value;
+            const blob = new Blob(recordedChunks, { type: 'video/mp4' });
+            const fileName = `${oId}_${tId}_${type}_${Date.now()}.mp4`;
+
+            // 1. Local Download
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fileName; a.click();
+            
+            // 2. Drive Upload (Serverless)
+            updateStatus("Uploading to Drive...");
+            try {
+                const metadata = { name: fileName, mimeType: 'video/mp4' };
+                const form = new FormData();
+                form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+                form.append('file', blob);
+
+                const upload = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+                    method: 'POST',
+                    headers: new Headers({ 'Authorization': 'Bearer ' + accessToken }),
+                    body: form
+                });
+                const file = await upload.json();
+
+                // 3. Log to Sheet
+                await gapi.client.sheets.spreadsheets.values.append({
+                    spreadsheetId: localStorage.getItem('sheetId'),
+                    range: 'Sheet1!A:F',
+                    valueInputOption: 'USER_ENTERED',
+                    resource: { values: [[oId, tId, document.getElementById('platform').value, type, new Date().toLocaleString(), file.id]] }
+                });
+                updateStatus("✅ All synced!");
+            } catch (e) {
+                updateStatus("❌ Cloud Sync Failed");
+                console.error(e);
+            }
+        }
+
+        function updateStatus(txt) { document.getElementById('status').innerText = `STATUS: ${txt}`; }
+    </script>
+</body>
+</html>
